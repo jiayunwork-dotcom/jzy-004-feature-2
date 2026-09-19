@@ -17,6 +17,11 @@ const (
 	ErrInvalidEngine    = "INVALID_ENGINE"        // engine 取值不支持
 	ErrDataFormat       = "DATA_FORMAT_ERROR"     // data 不是合法标准 base64
 	ErrChecksumFormat   = "CHECKSUM_FORMAT_ERROR" // checksum 十六进制格式/位数不对
+	ErrStateFormat      = "STATE_FORMAT_ERROR"    // state 令牌无法解码或未通过完整性校验
+	ErrStateParams      = "STATE_PARAMS_MISMATCH" // state 令牌属于另一个参数档
+	ErrStateOffset      = "STATE_OFFSET_MISMATCH" // 分块偏移与流位置不符（乱序/错位）
+	ErrBatchEmpty       = "BATCH_EMPTY"           // 批量请求 items 缺失或为空
+	ErrBatchTooLarge    = "BATCH_TOO_LARGE"       // 批量请求条目数超过单批上限
 	ErrMethodNotAllowed = "METHOD_NOT_ALLOWED"
 	ErrNotFound         = "NOT_FOUND"
 )
@@ -77,6 +82,60 @@ type VerifyResponse struct {
 	Valid    bool   `json:"valid"`
 	Residual string `json:"residual"` // 重新除法后的余数；正确码字为全 0
 	Engine   string `json:"engine"`
+}
+
+// ChunkRequest 是 POST /api/v1/chunks（分块流式核算）的请求体。
+//
+// 服务不保存任何分块进度：每次请求必须携带本分块在整段数据中的字节偏移
+// offset，以及上一块响应返回的 state 令牌（首块省略，此时 offset 必须为 0）。
+// 服务据此做纯函数式推进并返回新的 state 令牌。分块乱序或错位重传时，
+// offset 与令牌内流位置不符，请求在计算前被拒绝（STATE_OFFSET_MISMATCH）；
+// 用同一份 (state, offset, data) 重传则是幂等的，返回完全相同的结果。
+type ChunkRequest struct {
+	Profile string     `json:"profile,omitempty"`
+	Params  *ParamsDTO `json:"params,omitempty"`
+	Engine  string     `json:"engine,omitempty"`
+	Offset  *Uint64    `json:"offset"`          // 必填：本分块首字节在整段数据中的偏移
+	State   string     `json:"state,omitempty"` // 上一块响应的令牌；首块省略
+	Data    string     `json:"data"`            // 本分块载荷；标准 base64，空串表示空分块
+	Final   bool       `json:"final,omitempty"` // true 时收尾并额外返回整段校验码
+}
+
+// ChunkResponse 是分块推进的成功响应。
+type ChunkResponse struct {
+	Profile    string `json:"profile,omitempty"`
+	Width      uint8  `json:"width"`
+	Engine     string `json:"engine"`
+	Offset     uint64 `json:"offset"`          // 本请求消费的流位置
+	NextOffset uint64 `json:"next_offset"`     // 吃掉本分块后的流位置
+	Bytes      int    `json:"bytes"`           // 本分块字节数
+	State      string `json:"state"`           // 新的中间状态令牌（不透明，原样回传）
+	Check      string `json:"check,omitempty"` // 仅 final=true：整段数据的定长十六进制校验码
+}
+
+// BatchRequest 是 POST /api/v1/checksums/batch（批量核算）的请求体。
+// 每个条目与单次编码接口的请求体完全相同，共享同一套参数解析、
+// 格式校验与错误码语义。
+type BatchRequest struct {
+	Items []ComputeRequest `json:"items"`
+}
+
+// BatchResult 是批量响应中单个条目的结果：要么 ok=true 并给出校验码，
+// 要么 ok=false 并以与单次接口一致的结构化错误码说明失败原因。
+type BatchResult struct {
+	Index   int        `json:"index"` // 条目在请求 items 中的下标
+	OK      bool       `json:"ok"`
+	Profile string     `json:"profile,omitempty"`
+	Width   uint8      `json:"width,omitempty"`
+	Check   string     `json:"check,omitempty"`
+	Engine  string     `json:"engine,omitempty"`
+	Error   *ErrorBody `json:"error,omitempty"`
+}
+
+// BatchResponse 是批量核算的成功响应。只要请求信封合法，整体恒为 200，
+// 各条目成败互不影响，由 results 逐项给出。
+type BatchResponse struct {
+	Results []BatchResult `json:"results"`
 }
 
 // HealthResponse 是监控采集用的运行状态。

@@ -13,7 +13,8 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, ErrNotFound,
 		"unknown path "+r.URL.Path+
 			"; available: GET /healthz, GET /api/v1/profiles, GET /api/v1/vectors, "+
-			"POST /api/v1/checksums, POST /api/v1/verify")
+			"POST /api/v1/checksums, POST /api/v1/checksums/batch, "+
+			"POST /api/v1/chunks, POST /api/v1/verify")
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

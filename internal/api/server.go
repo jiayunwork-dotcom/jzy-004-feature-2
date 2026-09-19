@@ -12,14 +12,17 @@ import (
 )
 
 // Version 是服务版本号。
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 // Server 持有运行期只读状态。计算本身无状态：所有中间余数都是请求内局部
-// 变量，注册表启动后只读，因此并发请求之间不会有任何串扰。
+// 变量，注册表启动后只读，因此并发请求之间不会有任何串扰。分块流式核算的
+// 跨块状态全部封装在调用方回传的令牌里（stateKey 只用于令牌完整性校验，
+// 不是会话状态），服务同样可随意水平扩容。
 type Server struct {
 	startedAt time.Time
 	metrics   *metricsRegistry
 	mux       *http.ServeMux
+	stateKey  []byte
 }
 
 // NewServer 构建带全部路由的服务。
@@ -28,12 +31,15 @@ func NewServer() *Server {
 		startedAt: time.Now(),
 		metrics:   newMetrics(),
 		mux:       http.NewServeMux(),
+		stateKey:  stateKeyFromEnv(),
 	}
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/metrics", s.handleMetrics)
 	s.mux.HandleFunc("/api/v1/profiles", s.handleProfiles)
 	s.mux.HandleFunc("/api/v1/vectors", s.handleVectors)
 	s.mux.HandleFunc("/api/v1/checksums", s.handleChecksums)
+	s.mux.HandleFunc("/api/v1/checksums/batch", s.handleChecksumsBatch)
+	s.mux.HandleFunc("/api/v1/chunks", s.handleChunks)
 	s.mux.HandleFunc("/api/v1/verify", s.handleVerify)
 	s.mux.HandleFunc("/", s.handleNotFound)
 	return s

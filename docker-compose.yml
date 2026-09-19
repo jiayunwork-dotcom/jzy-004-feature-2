@@ -1,13 +1,16 @@
 services:
   crc-service:
     build: .
-    image: crc-service:1.0.0
+    image: crc-service:1.1.0
     container_name: crc-service
     ports:
       - "8080:8080"
     environment:
       # 监听地址，可改为 :其它端口
       CRC_LISTEN_ADDR: ":8080"
+      # 分块流式状态令牌的 HMAC 完整性密钥；多副本部署时所有副本应配置同一值。
+      # 不设置则使用内置默认密钥（仅完整性用途）。
+      # CRC_STATE_KEY: "change-me-for-multi-replica-deployments"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/crcsrv", "-healthcheck-uri", "http://127.0.0.1:8080/healthz"]
