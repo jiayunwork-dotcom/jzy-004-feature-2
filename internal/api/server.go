@@ -12,20 +12,29 @@ import (
 )
 
 // Version 是服务版本号。
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 // Server 持有运行期只读状态。计算本身无状态：所有中间余数都是请求内局部
 // 变量，注册表启动后只读，因此并发请求之间不会有任何串扰。
+// stateKey 用于签发/校验流式状态令牌（HMAC 密钥，属配置而非会话状态）。
 type Server struct {
 	startedAt time.Time
+	stateKey  []byte
 	metrics   *metricsRegistry
 	mux       *http.ServeMux
 }
 
-// NewServer 构建带全部路由的服务。
+// NewServer 构建带全部路由的服务。流式状态令牌的密钥取 CRC_STATE_KEY；
+// 未配置时使用进程级随机密钥（见 stateKeyFromEnv）。
 func NewServer() *Server {
+	return newServerWithKey(stateKeyFromEnv())
+}
+
+// newServerWithKey 用指定的流式状态密钥构建服务（测试与多实例部署用）。
+func newServerWithKey(stateKey []byte) *Server {
 	s := &Server{
 		startedAt: time.Now(),
+		stateKey:  stateKey,
 		metrics:   newMetrics(),
 		mux:       http.NewServeMux(),
 	}
@@ -34,6 +43,8 @@ func NewServer() *Server {
 	s.mux.HandleFunc("/api/v1/profiles", s.handleProfiles)
 	s.mux.HandleFunc("/api/v1/vectors", s.handleVectors)
 	s.mux.HandleFunc("/api/v1/checksums", s.handleChecksums)
+	s.mux.HandleFunc("/api/v1/checksums/batch", s.handleBatch)
+	s.mux.HandleFunc("/api/v1/stream", s.handleStream)
 	s.mux.HandleFunc("/api/v1/verify", s.handleVerify)
 	s.mux.HandleFunc("/", s.handleNotFound)
 	return s

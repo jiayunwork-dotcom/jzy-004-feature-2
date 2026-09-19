@@ -45,6 +45,10 @@ func main() {
 
 	go func() {
 		log.Printf("crc-service %s listening on %s", api.Version, addr)
+		if !api.StateKeyConfigured() {
+			log.Printf("CRC_STATE_KEY not set: stream state tokens use a random per-process key " +
+				"and will not survive restart or work across instances")
+		}
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("http server error: %v", err)
 		}

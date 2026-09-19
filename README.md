@@ -5,7 +5,10 @@
 
 - **编码**：按指定参数档算出固定位宽的 CRC 校验码；
 - **校验**：把「数据 + 校验码」交回，重新做一遍多项式除法，余数为零即通过，
-  否则判为被篡改或损坏。
+  否则判为被篡改或损坏；
+- **分块流式核算**：大载荷可拆成有序分块逐块提交推进，合并结果与整段
+  一次性计算逐位相同（服务不保存会话，中间状态由调用方携带）；
+- **批量核算**：一次请求算出多条载荷各自的校验码，单条失败独立定位。
 
 不涉及登录、账户、前端页面；不是文件同步器，也不是纠错码库。
 仅依赖 Go 标准库，无第三方运行时依赖。
@@ -92,7 +95,7 @@ Rocksoft 规范模型逐位一致（由独立参考实现交叉验证）。
 基本运行状态，供监控与容器健康检查采集。
 
 ```json
-{"status":"ok","version":"1.0.0","profiles":6,"up_since":"...","uptime_seconds":12}
+{"status":"ok","version":"1.1.0","profiles":6,"up_since":"...","uptime_seconds":12}
 ```
 
 ### `GET /metrics`
@@ -159,6 +162,95 @@ Rocksoft 规范模型逐位一致（由独立参考实现交叉验证）。
 { "width": 16, "valid": false, "residual": "9e91", "engine": "table" }
 ```
 
+### `POST /api/v1/checksums/batch`（批量核算）
+
+一次请求核算多条 `(profile 或 params, data)` 组合。`engine` 为整批默认
+除法路径，可被单条的 `engine` 覆盖；单批上限 1024 条。
+
+请求：
+
+```json
+{
+  "engine": "table",
+  "items": [
+    { "profile": "CRC-8", "data": "MTIzNDU2Nzg5" },
+    { "params": {"width": 16, "poly": "0x1021", "init": "0xffff",
+                 "ref_in": false, "ref_out": false, "xor_out": "0x0"},
+      "data": "MTIzNDU2Nzg5", "engine": "bitwise" },
+    { "profile": "CRC-666/NOPE", "data": "" }
+  ]
+}
+```
+
+响应（请求本身合法时整体恒为 200；每条独立成败，失败条目带 `index`
+与和单次接口同一套的结构化错误码，不影响其它条目）：
+
+```json
+{ "results": [
+  { "index": 0, "ok": true, "profile": "CRC-8", "width": 8, "check": "f4", "engine": "table" },
+  { "index": 1, "ok": true, "width": 16, "check": "29b1", "engine": "bitwise" },
+  { "index": 2, "ok": false,
+    "error": { "code": "UNKNOWN_PROFILE", "detail": "profile 'CRC-666/NOPE' is not registered; ..." } }
+] }
+```
+
+每条成功结果与逐条调用 `POST /api/v1/checksums` 逐位一致。
+
+### `POST /api/v1/stream`（大载荷分块流式核算）
+
+把一段长数据拆成若干**有序**分块逐块推进，最终合并出与「整段一次性
+算出」逐位相同的校验码。服务**不在服务端保存任何会话进度**：跨分块
+所需的中间状态（参数档、已消费偏移、除法寄存器）打包成一个带
+HMAC-SHA256 完整性校验的不透明**状态令牌**，由调用方在每次请求里回传。
+
+**首个分块**（不带 `state`，必须给 `profile` 或 `params`，`offset` 只能为 0）：
+
+```json
+{ "profile": "CRC-32/ISO-HDLC", "offset": 0, "data": "<第 1 块 base64>" }
+```
+
+响应（`final=false` 时签发下一状态令牌）：
+
+```json
+{ "profile": "CRC-32/ISO-HDLC", "width": 32, "engine": "table",
+  "offset": 0, "length": 65536, "next_offset": 65536,
+  "final": false, "state": "v1.<payload>.<mac>" }
+```
+
+**后续分块**：回传上一响应的 `state`，`offset` 必须等于上一响应的
+`next_offset`；`profile`/`params` 可省略（沿用令牌内已认证的参数档），
+若给出则必须与之一致。
+
+**最后一块**加 `"final": true`，响应给出最终校验码而不再签发状态：
+
+```json
+{ "state": "v1.<...>", "offset": 196608, "final": true, "data": "<末块 base64>" }
+```
+
+```json
+{ "profile": "CRC-32/ISO-HDLC", "width": 32, "engine": "table",
+  "offset": 196608, "length": 123, "next_offset": 196731,
+  "final": true, "check": "6b0b027a" }
+```
+
+约定与语义：
+
+- **数学正确性**：`init` 只在首块进入寄存器一次，输出反转与 `xor_out`
+  只在末块完成后各作用一次，分块边界无任何额外作用。对任意合法参数档
+  （含 `ref_in != ref_out` 混合档、非字节宽度临时档、`xor_out` 非零档）
+  都逐位成立；退化单块（首块即末块）与单次接口结果完全一致。
+- **乱序 / 重传**：`offset` 与令牌内已认证的期望偏移不符的分块被**拒绝**
+  （`409 STATE_MISMATCH`，detail 给出期望偏移），调用方据此重排即可；
+  用同一状态重发同一块是**幂等**的（返回逐位相同的新状态）。服务不靠
+  记忆已收块来实现这一点——定位信息全部在分块与已认证令牌里。
+- **空分块**：`data` 为空串是合法的恒等推进（偏移与寄存器不变）。
+- **防篡改**：令牌任何改动（含伪造、截断、换档续算）都在计算前以
+  `400 STATE_INVALID` 拒绝。令牌密钥取环境变量 **`CRC_STATE_KEY`**；
+  多实例部署必须在所有实例上配置同一密钥，令牌才能跨实例/跨重启流通。
+  未配置时使用进程启动时生成的随机密钥（单实例可用，重启即失效，
+  启动日志会有提示）。
+- **engine**：逐块可选 `table`/`bitwise`，两条路径同余，混用不改变结果。
+
 ### 校验原理
 
 校验端把提交的校验码先撤销 `xor_out` 与末级反射，恢复成除法寄存器空间里的
@@ -185,6 +277,8 @@ Rocksoft 规范模型逐位一致（由独立参考实现交叉验证）。
 | `INVALID_ENGINE` | 400 | `engine` 取值不支持 |
 | `DATA_FORMAT_ERROR` | 400 | `data` 不是合法标准 base64 |
 | `CHECKSUM_FORMAT_ERROR` | 400/422 | `checksum` 非十六进制、位数不对或超出位宽 |
+| `STATE_INVALID` | 400 | 流式状态令牌无法解析、被篡改或由其它密钥签发 |
+| `STATE_MISMATCH` | 409 | 分块偏移与已认证流位置冲突（乱序/重复），或续传参数档与令牌绑定档不一致 |
 | `METHOD_NOT_ALLOWED` | 405 | HTTP 方法不对 |
 | `NOT_FOUND` | 404 | 路径不存在 |
 
@@ -195,6 +289,11 @@ Rocksoft 规范模型逐位一致（由独立参考实现交叉验证）。
 每次请求的 CRC 计算都是纯函数：数据、起始寄存器、中间余数全部是请求内的
 局部变量；参数注册表启动后只读，256 项查表是不可变共享缓存。因此**不存在上一
 笔请求的中间余数污染下一笔结果**的可能。服务可随意水平扩容、并发处理。
+
+分块流式核算同样无状态：服务**不保存任何会话或分块进度**，跨分块推进所需
+的中间状态全部封装在调用方回传的防篡改状态令牌里（HMAC-SHA256 认证，
+密钥来自 `CRC_STATE_KEY` 环境变量，属配置而非会话状态）。任何实例都能
+处理任何一块，重试与水平扩容都不会产生串扰。
 
 ---
 
@@ -229,10 +328,15 @@ docker compose logs -f
 docker compose down
 
 # 方式二：原生 docker
-docker build -t crc-service:1.0.0 .
+docker build -t crc-service:1.1.0 .
 docker run -d --name crc-service -p 8080:8080 \
-  -e CRC_LISTEN_ADDR=":8080" crc-service:1.0.0
+  -e CRC_LISTEN_ADDR=":8080" \
+  -e CRC_STATE_KEY="$(head -c 32 /dev/urandom | base64)" \
+  crc-service:1.1.0
 ```
+
+> 多实例部署（负载均衡后多个副本）时，请为所有实例配置**相同**的
+> `CRC_STATE_KEY`，否则一个实例签发的流式状态令牌在另一实例上会被拒绝。
 
 运行镜像基于 `gcr.io/distroless/static`，内含一个静态链接的非 root 二进制，
 攻击面小；容器健康检查由二进制自带的
@@ -259,8 +363,21 @@ shell/curl。
    CCITT-FALSE→`ffff`、CRC-32→`00000000`）；
 8. **并发互不串扰**：包级 16 goroutine / 2000 任务、HTTP 级 32×50 混合请求，
    结果始终等于串行参考值且自校验通过；
-9. 另有非法显式参数拒绝、未知档名报错、base64/十六进制格式错误、
-   Prometheus 指标等接口级测试。
+9. **分块合并与整体一致**：内置档 + 随机临时档（含非字节宽度、混合反转、
+   `xor_out` 非零）× 随机切分（含空块、单字节块、末块长度不同、退化单块）
+   × 逐块混用引擎，链式合并结果与一次性计算逐位相同；任意前缀的中间态
+   完成末级后等于该前缀的单次结果（证明 init/反射/xor_out 不在分块边界
+   重复作用）；合并结果交单次校验接口判通过，合并前任意一块翻一个比特
+   则最终码改变且校验判失败；
+10. **乱序/重传自洽**：偏移不符的分块被 `STATE_MISMATCH` 拒绝并给出期望
+    偏移，同状态重发同一块幂等，被拒绝的乱序块不污染后续推进；
+11. **状态令牌防篡改**：逐字符扰动、截断、伪造、异密钥签发的令牌全部
+    `STATE_INVALID`；令牌内参数档与寄存器越界内容亦在解码端重新校验；
+12. **批量与逐条一致**：批量每条结果与单次接口逐位一致；单条失败带
+    `index` 与结构化错误码定位，不影响其它条目；信封级错误（缺 items、
+    超上限、整批引擎非法）整体拒绝；
+13. 另有非法显式参数拒绝、未知档名报错、base64/十六进制格式错误、
+    Prometheus 指标等接口级测试。
 
 ---
 
@@ -268,8 +385,10 @@ shell/curl。
 
 ```
 cmd/crcsrv/          程序入口（HTTP server、优雅关停、容器自检模式）
-internal/crc/        CRC 核心：参数档与校验、按位/查表双引擎、注册表、十六进制
-internal/api/        HTTP/JSON 接口、结构化错误、Prometheus 指标
+internal/crc/        CRC 核心：参数档与校验、按位/查表双引擎、注册表、十六进制、
+                     分块流式推进原语（InitRegister/AdvanceRegister/FinalizeRegister）
+internal/api/        HTTP/JSON 接口、结构化错误、流式状态令牌（HMAC 认证）、
+                     批量核算、Prometheus 指标
 Dockerfile           多阶段静态构建（distroless 运行镜像）
 docker-compose.yml   一键构建启动 + 健康检查
 ```

@@ -1,13 +1,16 @@
 services:
   crc-service:
     build: .
-    image: crc-service:1.0.0
+    image: crc-service:1.1.0
     container_name: crc-service
     ports:
       - "8080:8080"
     environment:
       # 监听地址，可改为 :其它端口
       CRC_LISTEN_ADDR: ":8080"
+      # 流式状态令牌密钥。单容器可不设（进程随机生成，重启后旧令牌失效）；
+      # 多副本部署时必须为所有副本配置同一密钥。
+      # CRC_STATE_KEY: "change-me-to-a-long-random-secret"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/crcsrv", "-healthcheck-uri", "http://127.0.0.1:8080/healthz"]

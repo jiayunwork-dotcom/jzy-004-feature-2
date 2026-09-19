@@ -17,6 +17,8 @@ const (
 	ErrInvalidEngine    = "INVALID_ENGINE"        // engine 取值不支持
 	ErrDataFormat       = "DATA_FORMAT_ERROR"     // data 不是合法标准 base64
 	ErrChecksumFormat   = "CHECKSUM_FORMAT_ERROR" // checksum 十六进制格式/位数不对
+	ErrStateInvalid     = "STATE_INVALID"         // 流式状态令牌无法解析或未通过完整性校验
+	ErrStateMismatch    = "STATE_MISMATCH"        // 分块偏移/参数档与已认证的流式状态冲突
 	ErrMethodNotAllowed = "METHOD_NOT_ALLOWED"
 	ErrNotFound         = "NOT_FOUND"
 )
@@ -77,6 +79,72 @@ type VerifyResponse struct {
 	Valid    bool   `json:"valid"`
 	Residual string `json:"residual"` // 重新除法后的余数；正确码字为全 0
 	Engine   string `json:"engine"`
+}
+
+// StreamRequest 是 POST /api/v1/stream 的请求体：在流式核算中推进一个分块。
+//
+// 首个分块不带 state，必须给出 profile 或 params（与单次接口同一套解析），
+// offset 只能为 0（缺省即 0）。后续分块回传上一响应的 state；此时
+// profile/params 可省略（取令牌内已认证的参数档），若给出则必须与令牌内
+// 参数档一致，否则拒绝。offset 必须等于令牌中已认证的下一偏移，乱序或重复
+// 分块因此被拒绝。final=true 表示这是最后一块，响应给出最终校验码而不再
+// 签发新状态。
+type StreamRequest struct {
+	Profile string     `json:"profile,omitempty"`
+	Params  *ParamsDTO `json:"params,omitempty"`
+	Engine  string     `json:"engine,omitempty"`
+	State   string     `json:"state,omitempty"`  // 上一响应签发的状态令牌；首块缺省
+	Offset  *uint64    `json:"offset,omitempty"` // 本分块在整段数据中的字节偏移
+	Final   bool       `json:"final,omitempty"`  // 是否为最后一块
+	Data    string     `json:"data"`             // 本分块载荷；标准 base64，空串为空分块
+}
+
+// StreamResponse 是分块推进的响应。final=false 时签发下一状态令牌；
+// final=true 时给出与单次接口逐位一致的最终校验码。
+type StreamResponse struct {
+	Profile    string `json:"profile,omitempty"`
+	Width      uint8  `json:"width"`
+	Engine     string `json:"engine"`
+	Offset     uint64 `json:"offset"`      // 本次接收分块的起始偏移
+	Length     int    `json:"length"`      // 本次接收分块的字节数
+	NextOffset uint64 `json:"next_offset"` // 下一块必须携带的偏移
+	Final      bool   `json:"final"`
+	State      string `json:"state,omitempty"` // 仅 final=false：供下一块回传的令牌
+	Check      string `json:"check,omitempty"` // 仅 final=true：整段数据的校验码
+}
+
+// BatchRequest 是 POST /api/v1/checksums/batch 的请求体。
+// Engine 为整批默认除法路径，可被单条的 engine 覆盖。
+type BatchRequest struct {
+	Engine string             `json:"engine,omitempty"`
+	Items  []BatchItemRequest `json:"items"` // 必填，至少为数组；上限 maxBatchItems
+}
+
+// BatchItemRequest 是批量核算中的一条 (参数档或临时档, 载荷) 组合，
+// 字段语义与 ComputeRequest 完全一致。
+type BatchItemRequest struct {
+	Profile string     `json:"profile,omitempty"`
+	Params  *ParamsDTO `json:"params,omitempty"`
+	Data    string     `json:"data"`
+	Engine  string     `json:"engine,omitempty"`
+}
+
+// BatchItemResult 是批量中一条的结果：成功时给出与单次接口完全相同的
+// 字段；失败时 error 定位原因（与单次接口同一套错误码），不影响其它条。
+type BatchItemResult struct {
+	Index   int        `json:"index"` // 对应请求 items 的下标
+	OK      bool       `json:"ok"`
+	Profile string     `json:"profile,omitempty"`
+	Width   uint8      `json:"width,omitempty"`
+	Check   string     `json:"check,omitempty"`
+	Engine  string     `json:"engine,omitempty"`
+	Error   *ErrorBody `json:"error,omitempty"`
+}
+
+// BatchResponse 是批量核算的响应：每条请求各有一个结果，顺序与下标对应。
+// 只要请求本身合法，整体恒返回 200；单条成败由各自结果的 ok 字段判定。
+type BatchResponse struct {
+	Results []BatchItemResult `json:"results"`
 }
 
 // HealthResponse 是监控采集用的运行状态。

@@ -145,6 +145,10 @@ func routeName(r *http.Request) string {
 		return "/api/v1/vectors"
 	case r.URL.Path == "/api/v1/checksums":
 		return "/api/v1/checksums"
+	case r.URL.Path == "/api/v1/checksums/batch":
+		return "/api/v1/checksums/batch"
+	case r.URL.Path == "/api/v1/stream":
+		return "/api/v1/stream"
 	case r.URL.Path == "/api/v1/verify":
 		return "/api/v1/verify"
 	default:
